@@ -1,3 +1,18 @@
+import sys
+import subprocess
+
+try:
+    import plotly.express as px
+except ModuleNotFoundError:
+    subprocess.check_call([
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "plotly==5.24.1"
+    ])
+    import plotly.express as px
+
 import pandas as pd
 import streamlit as st
 import plotly.express as px
