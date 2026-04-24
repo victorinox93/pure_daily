@@ -13,10 +13,30 @@ def load_data():
     df = pd.read_csv("data/pure_research_outputs_completo_con_autores.csv")
     resumen = pd.read_csv("data/pure_resumen_diario.csv")
 
-    df["created_date_mty"] = pd.to_datetime(df["created_date_mty"], errors="coerce")
-    df["modified_date_mty"] = pd.to_datetime(df["modified_date_mty"], errors="coerce")
-    df["created_day_mty"] = pd.to_datetime(df["created_day_mty"], errors="coerce")
-    df["modified_day_mty"] = pd.to_datetime(df["modified_day_mty"], errors="coerce")
+    # Convertir fechas base usando UTC para evitar error de zonas horarias mixtas
+    df["created_date"] = pd.to_datetime(
+        df["created_date"],
+        errors="coerce",
+        utc=True
+    )
+
+    df["modified_date"] = pd.to_datetime(
+        df["modified_date"],
+        errors="coerce",
+        utc=True
+    )
+
+    # Crear fechas en hora Monterrey desde las fechas base
+    df["created_date_mty"] = df["created_date"].dt.tz_convert("America/Monterrey")
+    df["modified_date_mty"] = df["modified_date"].dt.tz_convert("America/Monterrey")
+
+    df["created_day_mty"] = df["created_date_mty"].dt.date
+    df["modified_day_mty"] = df["modified_date_mty"].dt.date
+    df["created_month"] = df["created_date_mty"].dt.to_period("M").astype(str)
+
+    # Fechas del resumen
+    if "fecha" in resumen.columns:
+        resumen["fecha"] = pd.to_datetime(resumen["fecha"], errors="coerce").dt.date.astype(str)
 
     return df, resumen
 
