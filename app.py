@@ -1,19 +1,10 @@
-import pandas as pd
+    import pandas as pd
 import streamlit as st
-import sys
-import subprocess
+import plotly.express as px
 
-try:
-    import plotly.express as px
-except ModuleNotFoundError:
-    subprocess.check_call([
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "plotly==5.24.1"
-    ])
-    import plotly.express as px
+# ============================================================
+# CONFIGURACIÓN GENERAL
+# ============================================================
 
 st.set_page_config(
     page_title="Tablero Pure UDEM",
@@ -21,12 +12,16 @@ st.set_page_config(
     layout="wide"
 )
 
+# ============================================================
+# CARGA DE DATOS
+# ============================================================
+
 @st.cache_data
 def load_data():
     df = pd.read_csv("data/pure_research_outputs_completo_con_autores.csv")
     resumen = pd.read_csv("data/pure_resumen_diario.csv")
 
-    # Convertir fechas base usando UTC para evitar error de zonas horarias mixtas
+    # Fechas base
     df["created_date"] = pd.to_datetime(
         df["created_date"],
         errors="coerce",
@@ -39,7 +34,7 @@ def load_data():
         utc=True
     )
 
-    # Crear fechas en hora Monterrey desde las fechas base
+    # Fechas en hora Monterrey
     df["created_date_mty"] = df["created_date"].dt.tz_convert("America/Monterrey")
     df["modified_date_mty"] = df["modified_date"].dt.tz_convert("America/Monterrey")
 
@@ -47,170 +42,715 @@ def load_data():
     df["modified_day_mty"] = df["modified_date_mty"].dt.date
     df["created_month"] = df["created_date_mty"].dt.to_period("M").astype(str)
 
-    # Fechas del resumen
+    # Limpiar campos clave
+    for col in [
+        "tipo",
+        "titulo",
+        "autores",
+        "organizacion_responsable",
+        "organizaciones",
+        "workflow",
+        "portal_url"
+    ]:
+        if col in df.columns:
+            df[col] = df[col].replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+
+    # Resumen diario
     if "fecha" in resumen.columns:
-        resumen["fecha"] = pd.to_datetime(resumen["fecha"], errors="coerce").dt.date.astype(str)
+        resumen["fecha"] = pd.to_datetime(
+            resumen["fecha"],
+            errors="coerce"
+        ).dt.date
 
     return df, resumen
 
+
+@st.cache_data
+def load_daily_files():
+    nuevos = pd.read_csv("data/pure_nuevos_hoy_con_autores.csv")
+    modificados = pd.read_csv("data/pure_modificados_hoy_con_autores.csv")
+
+    return nuevos, modificados
+
+
 df, resumen = load_data()
+nuevos, modificados = load_daily_files()
 
-st.title("Tablero de Research Outputs en Pure")
-st.caption("Actualizado automáticamente desde la API de Pure UDEM")
+# ============================================================
+# ENCABEZADO
+# ============================================================
 
-ultima_fecha = resumen["fecha"].max() if not resumen.empty else "Sin fecha"
+st.title("Tablero Pure UDEM")
+st.caption("Seguimiento diario de research outputs registrados y modificados en Pure")
 
-col1, col2, col3, col4 = st.columns(4)
+ultima_fecha = None
 
-with col1:
-    st.metric("Total research outputs", f"{len(df):,}")
+if not resumen.empty and "fecha" in resumen.columns:
+    ultima_fecha = resumen["fecha"].max()
 
-with col2:
-    nuevos_ultimo_dia = int(resumen.sort_values("fecha").tail(1)["nuevos_hoy"].iloc[0])
-    st.metric("Nuevos último corte", nuevos_ultimo_dia)
-
-with col3:
-    modificados_ultimo_dia = int(resumen.sort_values("fecha").tail(1)["modificados_hoy"].iloc[0])
-    st.metric("Modificados último corte", modificados_ultimo_dia)
-
-with col4:
-    st.metric("Última actualización", ultima_fecha)
-
-st.divider()
+# ============================================================
+# SIDEBAR / FILTROS
+# ============================================================
 
 with st.sidebar:
     st.header("Filtros")
 
-    tipos = sorted(df["tipo"].dropna().unique())
-    tipo_sel = st.multiselect("Tipo de registro", tipos, default=tipos)
+    tipos = sorted(df["tipo"].dropna().unique()) if "tipo" in df.columns else []
+    tipo_sel = st.multiselect(
+        "Tipo de registro",
+        tipos,
+        default=tipos
+    )
 
-    orgs = sorted(df["organizacion_responsable"].dropna().unique())
-    org_sel = st.multiselect("Organización responsable", orgs)
+    orgs = (
+        sorted(df["organizacion_responsable"].dropna().unique())
+        if "organizacion_responsable" in df.columns
+        else []
+    )
 
-    busqueda = st.text_input("Buscar en título o autores")
+    org_sel = st.multiselect(
+        "Organización responsable",
+        orgs
+    )
 
-df_filtrado = df[df["tipo"].isin(tipo_sel)].copy()
+    anios_disponibles = sorted(
+        df["created_date_mty"].dropna().dt.year.unique(),
+        reverse=True
+    )
+
+    anios_sel = st.multiselect(
+        "Año de creación",
+        anios_disponibles,
+        default=anios_disponibles
+    )
+
+    busqueda = st.text_input(
+        "Buscar por título o autor"
+    )
+
+    st.divider()
+
+    st.caption("Los filtros afectan las gráficas y tablas principales del tablero.")
+
+
+# ============================================================
+# APLICAR FILTROS
+# ============================================================
+
+df_filtrado = df.copy()
+
+if tipo_sel:
+    df_filtrado = df_filtrado[df_filtrado["tipo"].isin(tipo_sel)]
 
 if org_sel:
-    df_filtrado = df_filtrado[df_filtrado["organizacion_responsable"].isin(org_sel)]
+    df_filtrado = df_filtrado[
+        df_filtrado["organizacion_responsable"].isin(org_sel)
+    ]
+
+if anios_sel:
+    df_filtrado = df_filtrado[
+        df_filtrado["created_date_mty"].dt.year.isin(anios_sel)
+    ]
 
 if busqueda:
-    texto = busqueda.lower()
+    texto = busqueda.lower().strip()
+
     df_filtrado = df_filtrado[
         df_filtrado["titulo"].fillna("").str.lower().str.contains(texto)
         | df_filtrado["autores"].fillna("").str.lower().str.contains(texto)
     ]
 
-st.subheader("Resumen del conjunto filtrado")
 
-c1, c2, c3 = st.columns(3)
+# ============================================================
+# KPIs PRINCIPALES
+# ============================================================
 
-with c1:
-    st.metric("Registros filtrados", f"{len(df_filtrado):,}")
+total_registros = len(df)
+total_filtrado = len(df_filtrado)
+con_autores = df["autores"].notna().sum()
+con_org = df["organizacion_responsable"].notna().sum()
 
-with c2:
-    st.metric("Con autores", f"{df_filtrado['autores'].notna().sum():,}")
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 
-with c3:
-    st.metric("Con organización responsable", f"{df_filtrado['organizacion_responsable'].notna().sum():,}")
+with col1:
+    st.metric("Total registros", f"{total_registros:,}")
+
+with col2:
+    st.metric("Filtrados", f"{total_filtrado:,}")
+
+with col3:
+    st.metric("Nuevos último corte", f"{len(nuevos):,}")
+
+with col4:
+    st.metric("Modificados último corte", f"{len(modificados):,}")
+
+with col5:
+    st.metric("Con autores", f"{con_autores:,}")
+
+with col6:
+    st.metric("Última actualización", str(ultima_fecha))
+
 
 st.divider()
 
-col_g1, col_g2 = st.columns(2)
+# ============================================================
+# TABS
+# ============================================================
 
-with col_g1:
-    resumen_tipo = (
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "Resumen ejecutivo",
+    "Actividad diaria",
+    "Producción",
+    "Calidad de datos",
+    "Tabla completa"
+])
+
+# ============================================================
+# TAB 1: RESUMEN EJECUTIVO
+# ============================================================
+
+with tab1:
+    st.subheader("Resumen ejecutivo")
+
+    c1, c2 = st.columns([1, 1])
+
+    with c1:
+        resumen_tipo = (
+            df_filtrado.groupby("tipo", dropna=False)
+            .size()
+            .reset_index(name="total")
+            .sort_values("total", ascending=True)
+        )
+
+        fig_tipo = px.bar(
+            resumen_tipo,
+            x="total",
+            y="tipo",
+            orientation="h",
+            text="total",
+            title="Research outputs por tipo"
+        )
+
+        fig_tipo.update_layout(
+            height=500,
+            xaxis_title="Total de registros",
+            yaxis_title="",
+            showlegend=False,
+            margin=dict(l=10, r=10, t=60, b=10)
+        )
+
+        st.plotly_chart(fig_tipo, use_container_width=True)
+
+    with c2:
+        resumen_org = (
+            df_filtrado.dropna(subset=["organizacion_responsable"])
+            .groupby("organizacion_responsable")
+            .size()
+            .reset_index(name="total")
+            .sort_values("total", ascending=False)
+            .head(15)
+            .sort_values("total", ascending=True)
+        )
+
+        if resumen_org.empty:
+            st.info("No hay datos de organización responsable con los filtros actuales.")
+        else:
+            fig_org = px.bar(
+                resumen_org,
+                x="total",
+                y="organizacion_responsable",
+                orientation="h",
+                text="total",
+                title="Top 15 organizaciones responsables"
+            )
+
+            fig_org.update_layout(
+                height=600,
+                xaxis_title="Total de registros",
+                yaxis_title="",
+                showlegend=False,
+                margin=dict(l=10, r=10, t=60, b=10)
+            )
+
+            st.plotly_chart(fig_org, use_container_width=True)
+
+    st.subheader("Participación por tipo")
+
+    resumen_tipo_pie = (
         df_filtrado.groupby("tipo")
         .size()
         .reset_index(name="total")
         .sort_values("total", ascending=False)
     )
 
-    fig_tipo = px.bar(
-        resumen_tipo,
-        x="tipo",
-        y="total",
-        title="Research outputs por tipo",
-        text="total"
-    )
+    if not resumen_tipo_pie.empty:
+        fig_dona = px.pie(
+            resumen_tipo_pie,
+            names="tipo",
+            values="total",
+            hole=0.5,
+            title="Distribución porcentual por tipo"
+        )
 
-    fig_tipo.update_layout(xaxis_title="", yaxis_title="Total")
-    st.plotly_chart(fig_tipo, use_container_width=True)
+        fig_dona.update_layout(
+            height=500,
+            margin=dict(l=10, r=10, t=60, b=10)
+        )
 
-with col_g2:
-    resumen_org = (
-        df_filtrado.groupby("organizacion_responsable")
+        st.plotly_chart(fig_dona, use_container_width=True)
+    else:
+        st.info("No hay datos disponibles para mostrar la distribución por tipo.")
+
+
+# ============================================================
+# TAB 2: ACTIVIDAD DIARIA
+# ============================================================
+
+with tab2:
+    st.subheader("Actividad diaria detectada")
+
+    if resumen.empty:
+        st.info("Todavía no hay histórico diario suficiente.")
+    else:
+        resumen_plot = resumen.copy()
+        resumen_plot = resumen_plot.sort_values("fecha")
+
+        columnas_actividad = [
+            col for col in ["nuevos_hoy", "modificados_hoy"]
+            if col in resumen_plot.columns
+        ]
+
+        if columnas_actividad:
+            fig_diario = px.bar(
+                resumen_plot,
+                x="fecha",
+                y=columnas_actividad,
+                barmode="group",
+                title="Nuevos y modificados por día"
+            )
+
+            fig_diario.update_layout(
+                height=450,
+                xaxis_title="Fecha",
+                yaxis_title="Registros",
+                legend_title="Indicador",
+                margin=dict(l=10, r=10, t=60, b=10)
+            )
+
+            st.plotly_chart(fig_diario, use_container_width=True)
+
+        st.subheader("Bitácora diaria")
+
+        columnas_resumen = [
+            col for col in [
+                "fecha",
+                "total_research_outputs",
+                "nuevos_hoy",
+                "modificados_hoy",
+                "con_autores",
+                "con_organizacion_responsable",
+                "fecha_maxima_creacion",
+                "fecha_maxima_modificacion"
+            ]
+            if col in resumen.columns
+        ]
+
+        st.dataframe(
+            resumen[columnas_resumen].sort_values("fecha", ascending=False),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    st.divider()
+
+    st.subheader("Nuevos registros del último corte")
+
+    if nuevos.empty:
+        st.info("No se detectaron registros nuevos en el último corte.")
+    else:
+        columnas_nuevos = [
+            col for col in [
+                "pure_id",
+                "tipo",
+                "titulo",
+                "autores",
+                "total_autores",
+                "organizacion_responsable",
+                "created_date_mty",
+                "portal_url"
+            ]
+            if col in nuevos.columns
+        ]
+
+        st.dataframe(
+            nuevos[columnas_nuevos],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "portal_url": st.column_config.LinkColumn("Liga Pure")
+            }
+        )
+
+    st.subheader("Registros modificados del último corte")
+
+    if modificados.empty:
+        st.info("No se detectaron registros modificados en el último corte.")
+    else:
+        columnas_modificados = [
+            col for col in [
+                "pure_id",
+                "tipo",
+                "titulo",
+                "autores",
+                "total_autores",
+                "organizacion_responsable",
+                "modified_date_mty",
+                "portal_url"
+            ]
+            if col in modificados.columns
+        ]
+
+        st.dataframe(
+            modificados[columnas_modificados],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "portal_url": st.column_config.LinkColumn("Liga Pure")
+            }
+        )
+
+
+# ============================================================
+# TAB 3: PRODUCCIÓN
+# ============================================================
+
+with tab3:
+    st.subheader("Producción y tendencias")
+
+    resumen_mes = (
+        df_filtrado.groupby("created_month")
         .size()
         .reset_index(name="total")
-        .sort_values("total", ascending=False)
-        .head(20)
+        .sort_values("created_month")
     )
 
-    fig_org = px.bar(
-        resumen_org,
-        x="total",
-        y="organizacion_responsable",
-        title="Top 20 organizaciones responsables",
-        orientation="h",
-        text="total"
-    )
+    resumen_mes_24 = resumen_mes.tail(24)
 
-    fig_org.update_layout(xaxis_title="Total", yaxis_title="")
-    st.plotly_chart(fig_org, use_container_width=True)
+    if resumen_mes_24.empty:
+        st.info("No hay datos mensuales disponibles con los filtros actuales.")
+    else:
+        fig_mes = px.bar(
+            resumen_mes_24,
+            x="created_month",
+            y="total",
+            text="total",
+            title="Research outputs creados por mes (últimos 24 meses)"
+        )
 
-st.subheader("Tendencia mensual")
+        fig_mes.update_layout(
+            height=450,
+            xaxis_title="Mes de creación",
+            yaxis_title="Total de registros",
+            margin=dict(l=10, r=10, t=60, b=10)
+        )
 
-resumen_mes = (
-    df_filtrado.groupby("created_month")
-    .size()
-    .reset_index(name="total")
-    .sort_values("created_month")
-)
+        st.plotly_chart(fig_mes, use_container_width=True)
 
-fig_mes = px.line(
-    resumen_mes,
-    x="created_month",
-    y="total",
-    markers=True,
-    title="Research outputs creados por mes"
-)
+    c1, c2 = st.columns([1, 1])
 
-fig_mes.update_layout(xaxis_title="Mes de creación", yaxis_title="Total")
-st.plotly_chart(fig_mes, use_container_width=True)
+    with c1:
+        st.subheader("Top autores")
 
-st.subheader("Actividad diaria detectada")
+        autores_series = (
+            df_filtrado["autores"]
+            .dropna()
+            .str.split(";")
+            .explode()
+            .str.strip()
+        )
 
-fig_diario = px.line(
-    resumen.sort_values("fecha"),
-    x="fecha",
-    y=["nuevos_hoy", "modificados_hoy"],
-    markers=True,
-    title="Nuevos y modificados por día"
-)
+        autores_series = autores_series[autores_series != ""]
 
-fig_diario.update_layout(xaxis_title="Fecha", yaxis_title="Registros")
-st.plotly_chart(fig_diario, use_container_width=True)
+        if autores_series.empty:
+            st.info("No hay autores disponibles con los filtros actuales.")
+        else:
+            top_autores = autores_series.value_counts().reset_index()
+            top_autores.columns = ["autor", "total"]
+            top_autores = (
+                top_autores
+                .head(15)
+                .sort_values("total", ascending=True)
+            )
 
-st.subheader("Últimos registros modificados")
+            fig_autores = px.bar(
+                top_autores,
+                x="total",
+                y="autor",
+                orientation="h",
+                text="total",
+                title="Top 15 autores"
+            )
 
-ultimos = df_filtrado.sort_values("modified_date_mty", ascending=False)[
-    [
-        "pure_id",
-        "tipo",
-        "titulo",
-        "autores",
-        "organizacion_responsable",
+            fig_autores.update_layout(
+                height=600,
+                xaxis_title="Total de registros",
+                yaxis_title="",
+                showlegend=False,
+                margin=dict(l=10, r=10, t=60, b=10)
+            )
+
+            st.plotly_chart(fig_autores, use_container_width=True)
+
+    with c2:
+        st.subheader("Top organizaciones internas")
+
+        if "organizaciones" in df_filtrado.columns:
+            org_series = (
+                df_filtrado["organizaciones"]
+                .dropna()
+                .str.split(";")
+                .explode()
+                .str.strip()
+            )
+
+            org_series = org_series[org_series != ""]
+
+            if org_series.empty:
+                st.info("No hay organizaciones internas disponibles.")
+            else:
+                top_orgs = org_series.value_counts().reset_index()
+                top_orgs.columns = ["organizacion", "total"]
+                top_orgs = (
+                    top_orgs
+                    .head(15)
+                    .sort_values("total", ascending=True)
+                )
+
+                fig_top_orgs = px.bar(
+                    top_orgs,
+                    x="total",
+                    y="organizacion",
+                    orientation="h",
+                    text="total",
+                    title="Top 15 organizaciones internas"
+                )
+
+                fig_top_orgs.update_layout(
+                    height=600,
+                    xaxis_title="Total de registros",
+                    yaxis_title="",
+                    showlegend=False,
+                    margin=dict(l=10, r=10, t=60, b=10)
+                )
+
+                st.plotly_chart(fig_top_orgs, use_container_width=True)
+        else:
+            st.info("No existe la columna de organizaciones internas.")
+
+    st.subheader("Últimos registros creados")
+
+    ultimos_creados = df_filtrado.sort_values(
         "created_date_mty",
-        "modified_date_mty",
-        "portal_url"
-    ]
-].head(100)
+        ascending=False
+    )
 
-st.dataframe(
-    ultimos,
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "portal_url": st.column_config.LinkColumn("Liga Pure")
-    }
-)
+    columnas_ultimos_creados = [
+        col for col in [
+            "pure_id",
+            "tipo",
+            "titulo",
+            "autores",
+            "organizacion_responsable",
+            "created_date_mty",
+            "portal_url"
+        ]
+        if col in ultimos_creados.columns
+    ]
+
+    st.dataframe(
+        ultimos_creados[columnas_ultimos_creados].head(100),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "portal_url": st.column_config.LinkColumn("Liga Pure")
+        }
+    )
+
+    st.subheader("Últimos registros modificados")
+
+    ultimos_modificados = df_filtrado.sort_values(
+        "modified_date_mty",
+        ascending=False
+    )
+
+    columnas_ultimos_modificados = [
+        col for col in [
+            "pure_id",
+            "tipo",
+            "titulo",
+            "autores",
+            "organizacion_responsable",
+            "modified_date_mty",
+            "portal_url"
+        ]
+        if col in ultimos_modificados.columns
+    ]
+
+    st.dataframe(
+        ultimos_modificados[columnas_ultimos_modificados].head(100),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "portal_url": st.column_config.LinkColumn("Liga Pure")
+        }
+    )
+
+
+# ============================================================
+# TAB 4: CALIDAD DE DATOS
+# ============================================================
+
+with tab4:
+    st.subheader("Calidad de datos")
+
+    sin_autores = df[df["autores"].isna()]
+    sin_org_responsable = df[df["organizacion_responsable"].isna()]
+    sin_titulo = df[df["titulo"].isna()]
+
+    if "workflow" in df.columns:
+        sin_workflow = df[df["workflow"].isna()]
+    else:
+        sin_workflow = pd.DataFrame()
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    with c1:
+        st.metric("Sin autores", f"{len(sin_autores):,}")
+
+    with c2:
+        st.metric("Sin org. responsable", f"{len(sin_org_responsable):,}")
+
+    with c3:
+        st.metric("Sin título", f"{len(sin_titulo):,}")
+
+    with c4:
+        st.metric("Sin workflow", f"{len(sin_workflow):,}")
+
+    st.divider()
+
+    columnas_calidad = [
+        col for col in [
+            "pure_id",
+            "tipo",
+            "titulo",
+            "autores",
+            "organizacion_responsable",
+            "created_date_mty",
+            "modified_date_mty",
+            "portal_url"
+        ]
+        if col in df.columns
+    ]
+
+    with st.expander("Ver registros sin autores"):
+        if sin_autores.empty:
+            st.success("No se encontraron registros sin autores.")
+        else:
+            st.dataframe(
+                sin_autores[columnas_calidad].head(500),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "portal_url": st.column_config.LinkColumn("Liga Pure")
+                }
+            )
+
+    with st.expander("Ver registros sin organización responsable"):
+        if sin_org_responsable.empty:
+            st.success("No se encontraron registros sin organización responsable.")
+        else:
+            st.dataframe(
+                sin_org_responsable[columnas_calidad].head(500),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "portal_url": st.column_config.LinkColumn("Liga Pure")
+                }
+            )
+
+    with st.expander("Ver registros sin título"):
+        if sin_titulo.empty:
+            st.success("No se encontraron registros sin título.")
+        else:
+            st.dataframe(
+                sin_titulo[columnas_calidad].head(500),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "portal_url": st.column_config.LinkColumn("Liga Pure")
+                }
+            )
+
+    with st.expander("Ver registros sin workflow"):
+        if sin_workflow.empty:
+            st.success("No se encontraron registros sin workflow.")
+        else:
+            st.dataframe(
+                sin_workflow[columnas_calidad].head(500),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "portal_url": st.column_config.LinkColumn("Liga Pure")
+                }
+            )
+
+
+# ============================================================
+# TAB 5: TABLA COMPLETA
+# ============================================================
+
+with tab5:
+    st.subheader("Tabla completa filtrada")
+
+    st.caption(
+        "Esta tabla refleja los filtros seleccionados en la barra lateral."
+    )
+
+    columnas_tabla = [
+        col for col in [
+            "pure_id",
+            "uuid",
+            "tipo",
+            "titulo",
+            "autores",
+            "total_autores",
+            "organizacion_responsable",
+            "organizaciones",
+            "created_date_mty",
+            "modified_date_mty",
+            "workflow",
+            "portal_url"
+        ]
+        if col in df_filtrado.columns
+    ]
+
+    st.dataframe(
+        df_filtrado[columnas_tabla],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "portal_url": st.column_config.LinkColumn("Liga Pure")
+        }
+    )
+
+    csv_filtrado = df_filtrado[columnas_tabla].to_csv(
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+    st.download_button(
+        label="Descargar tabla filtrada CSV",
+        data=csv_filtrado,
+        file_name="pure_research_outputs_filtrado.csv",
+        mime="text/csv"
+    )
